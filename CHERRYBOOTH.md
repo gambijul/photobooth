@@ -10,6 +10,7 @@ regroupe :
 | `feat/start-screen-qr` (PR #1675) | QR code optionnel sur l'écran d'accueil |
 | `fix/camera-robustness` | Service caméra : watchdog systemd, arrêt propre, `set_config` qui ne tue plus le service, reconnexion de l'aperçu, `--previewFps`, journaux lisibles après une coupure de courant |
 | `feat/admin-dashboard` | Tableau de bord de santé dans l'admin |
+| `fix/admin-session-expired` | Plus d'enregistrement qui tourne sans fin quand la session admin a expiré |
 | commit `feat(cameracontrol): optional live view autofocus` | Option `--autofocus` (mise au point en live view avant la photo) |
 | commit `feat(remote-storage): skip empty folder/title` | Plus de dossier `n-a` côté SFTP |
 
