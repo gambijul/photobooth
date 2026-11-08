@@ -36,6 +36,19 @@ if (!function_exists('checkCsrfOrFail')) {
 // Enforce admin session only when login is enabled
 if ($config['login']['enabled']) {
     if (!isset($_SESSION['auth']) || $_SESSION['auth'] !== true) {
+        // API calls (fetch / ajax) cannot follow a redirect to the login page:
+        // answer with a JSON error so the admin interface can react.
+        $script = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_FILENAME'] ?? ''));
+        if (str_contains($script, '/api/')) {
+            http_response_code(401);
+            header('Content-Type: application/json');
+            echo json_encode([
+                'status' => 'error',
+                'error' => 'Not authenticated',
+                'login' => PathUtility::getPublicPath('login'),
+            ]);
+            exit();
+        }
         header('Location: ' . PathUtility::getPublicPath('login'));
         exit();
     }
