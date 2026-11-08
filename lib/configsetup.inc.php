@@ -408,6 +408,13 @@ return [
             'name' => 'DATABASEREBUILDBUTTON',
             'value' => 'databaserebuild-btn',
         ],
+        'dashboard_button' => [
+            'view' => 'basic',
+            'type' => 'button',
+            'placeholder' => 'dashboard',
+            'name' => 'DASHBOARDBUTTON',
+            'value' => 'dashboard-btn',
+        ],
         'diskusage_button' => [
             'view' => 'basic',
             'type' => 'button',
