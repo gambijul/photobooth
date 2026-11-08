@@ -89,9 +89,16 @@ class RemoteStorageService
 
     public function getStorageFolder(): string
     {
-        $storageFolder = SlugUtility::create($this->config['folder']) . '/' . SlugUtility::create($this->config['title']);
+        // Empty parts (folder, title) are skipped instead of becoming "n-a", so
+        // pictures can be written straight into the base folder.
+        $parts = [];
+        foreach ([$this->config['folder'], $this->config['title']] as $part) {
+            if (trim((string) $part) !== '') {
+                $parts[] = SlugUtility::create((string) $part);
+            }
+        }
 
-        return $storageFolder;
+        return implode('/', $parts);
     }
 
     public function fileExists(string $location): bool
