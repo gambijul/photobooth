@@ -151,6 +151,13 @@ $(function () {
         });
     });
 
+    $('#dashboard-btn').on('click', function (e) {
+        e.preventDefault();
+        location.assign('../admin/dashboard');
+
+        return false;
+    });
+
     $('#diskusage-btn').on('click', function (e) {
         e.preventDefault();
         location.assign('../admin/diskusage');
