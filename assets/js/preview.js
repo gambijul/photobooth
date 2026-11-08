@@ -46,7 +46,48 @@ const photoboothPreview = (function () {
         url,
         pictureFrame,
         collageFrame,
+        reconnectTimer = null,
         retryGetMedia = 3;
+
+    // The camera stream can end on its own, e.g. when the camera service is
+    // restarted (the virtual video device is recreated). Without this the
+    // preview stays black until the page is reloaded.
+    const reconnectDelay = 3000,
+        maxReconnectAttempts = 20;
+
+    function scheduleReconnect(attempt) {
+        clearTimeout(reconnectTimer);
+        if (attempt >= maxReconnectAttempts) {
+            photoboothTools.console.log('ERROR: Preview: giving up reconnecting the camera stream.');
+            return;
+        }
+        reconnectTimer = setTimeout(function () {
+            if (api.stream) {
+                return;
+            }
+            photoboothTools.console.logDev('Preview: reconnecting camera stream, attempt ' + (attempt + 1));
+            api.initializeMedia(
+                () => photoboothTools.console.log('Preview: camera stream reconnected.'),
+                0,
+                () => scheduleReconnect(attempt + 1)
+            );
+        }, reconnectDelay);
+    }
+
+    function watchStream(stream) {
+        stream.getVideoTracks().forEach((track) => {
+            track.addEventListener('ended', function () {
+                // track.stop() (stopVideo) does not fire "ended" and resets api.stream,
+                // so this only runs when the stream ended unexpectedly.
+                if (api.stream !== stream) {
+                    return;
+                }
+                photoboothTools.console.log('Preview: camera stream ended unexpectedly, reconnecting...');
+                api.stream = null;
+                scheduleReconnect(0);
+            });
+        });
+    }
 
     api.changeVideoMode = function (mode) {
         photoboothTools.console.logDev('Preview: Changing video mode: ' + mode);
@@ -60,7 +101,10 @@ const photoboothPreview = (function () {
         cb = () => {
             return;
         },
-        retry = 0
+        retry = 0,
+        onFailure = () => {
+            return;
+        }
     ) {
         photoboothTools.console.logDev('Preview: Trying to initialize media...');
         if (
@@ -112,7 +156,9 @@ const photoboothPreview = (function () {
             .call(navigator.mediaDevices, webcamConstraints)
             .then(function (stream) {
                 photoboothTools.console.logDev('Preview: getMedia done!');
+                clearTimeout(reconnectTimer);
                 api.stream = stream;
+                watchStream(stream);
                 video.get(0).srcObject = stream;
                 cb();
             })
@@ -124,12 +170,13 @@ const photoboothPreview = (function () {
                     );
                     retry += 1;
                     setTimeout(function () {
-                        api.initializeMedia(cb, retry);
+                        api.initializeMedia(cb, retry, onFailure);
                     }, 1000);
                 } else {
                     photoboothTools.console.logDev(
                         'ERROR: Preview: Unable to get user media. Failed retries: ' + retry
                     );
+                    onFailure();
                 }
             });
     };
@@ -248,6 +295,7 @@ const photoboothPreview = (function () {
 
     api.stopVideo = function () {
         loader.css('--stage-background', 'var(--background-countdown-color)');
+        clearTimeout(reconnectTimer);
         if (api.stream) {
             const tracks = api.stream.getTracks();
             tracks.forEach((track) => track.stop());

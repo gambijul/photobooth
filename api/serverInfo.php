@@ -94,7 +94,15 @@ function readFileContents(string $file): string|false
             throw new \Exception('INFO: Path (' . $file . ') is not a file');
         }
 
-        return file_get_contents($file);
+        $content = file_get_contents($file);
+        if ($content === false) {
+            return false;
+        }
+
+        // After a power cut, ext4 can leave the end of a file that was being
+        // appended filled with NUL bytes. Browsers and grep then treat the whole
+        // log as binary, so show a readable marker instead.
+        return (string) preg_replace('/\x00+/', "\n[... unreadable data, probably written during a power cut ...]\n", $content);
     } catch (\Exception $e) {
         return $e->getMessage();
     }

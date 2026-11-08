@@ -26,7 +26,36 @@ import gphoto2 as gp
 
 TEMP_VIDEO_FILE_APPENDIX = ".temp.mp4"
 
+# How often the daemon tells systemd it is still alive (see sd_notify)
+WATCHDOG_PING_INTERVAL = 2.0
+
 log = logging.getLogger(__name__)
+
+
+def sd_notify(message: str) -> bool:
+    """
+    Send a notification to systemd (sd_notify protocol) without any dependency.
+
+    Used for `Type=notify` (READY=1) and `WatchdogSec=` (WATCHDOG=1): when a
+    gphoto2 call hangs the main loop stops pinging, so systemd kills and restarts
+    the service instead of leaving the photobooth without camera.
+
+    Returns False when not running under systemd or when sending failed.
+    """
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return False
+    if address.startswith("@"):
+        # abstract namespace socket
+        address = "\0" + address[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(address)
+            sock.sendall(message.encode())
+        return True
+    except OSError as e:
+        log.debug("sd_notify failed: %s" % e)
+        return False
 
 
 class CouldNotConnectException(Exception):
@@ -113,6 +142,9 @@ class CameraControl:
         self.socket = None
         self.ffmpeg = None
         self.bsm_stopTime = None
+        self.preview_fps = getattr(args, "preview_fps", None) or 0
+        self.last_preview_frame = 0.0
+        self.last_watchdog_ping = 0.0
 
         self.connect_to_camera()
         self.apply_configuration()
@@ -160,7 +192,7 @@ class CameraControl:
             # be sure the output mode is not set to PC
             # otherwise the flash is not triggered
             self.set_config("output", "Off")
-        except UnsupportedConfigException as e:
+        except (UnsupportedConfigException, ValueError, gp.GPhoto2Error) as e:
             log.error(e)
 
         log.info("Capturing image")
@@ -196,7 +228,10 @@ class CameraControl:
         """
         Set a new config value
 
-        May raises UnsupportedConfigException
+        Raises UnsupportedConfigException when the camera does not know the
+        parameter, ValueError for an invalid value and gp.GPhoto2Error when the
+        camera refuses it. It never stops the service: a single rejected setting
+        must not leave the photobooth without camera.
         """
 
         if not self.check_config_support(name):
@@ -213,14 +248,15 @@ class CameraControl:
             ):
                 try:
                     int_value = int(value)
-                    count = setting.count_choices()
-                    if int_value < 0 or int_value >= count:
-                        log.error("Parameter out of range")
-                        self.exit_gracefully(rc=1)
-                    choice = setting.get_choice(int_value)
-                    setting.set_value(choice)
                 except ValueError:
                     setting.set_value(value)
+                else:
+                    count = setting.count_choices()
+                    if int_value < 0 or int_value >= count:
+                        raise ValueError(
+                            "Parameter out of range for %s=%s" % (name, value)
+                        )
+                    setting.set_value(setting.get_choice(int_value))
             elif setting_type == gp.GP_WIDGET_TOGGLE:
                 setting.set_value(int(value))
             elif setting_type == gp.GP_WIDGET_RANGE:
@@ -228,15 +264,14 @@ class CameraControl:
             else:
                 # unhandled types (most don't make any sense to handle)
                 # GP_WIDGET_SECTION, GP_WIDGET_WINDOW, GP_WIDGET_BUTTON, GP_WIDGET_DATE
-                log.error(
+                raise ValueError(
                     "Unhandled setting type %s for %s=%s" % (setting_type, name, value)
                 )
-                self.exit_gracefully(rc=1)
             self.camera.set_config(config)
             log.info("Config set %s=%s" % (name, value))
-        except gp.GPhoto2Error or ValueError:
-            log.error("Config error for %s=%s" % (name, value))
-            self.exit_gracefully(rc=1)
+        except (gp.GPhoto2Error, ValueError) as e:
+            log.error("Config error for %s=%s: %s" % (name, value, e))
+            raise
 
     def disable_video(self):
         """
@@ -247,7 +282,7 @@ class CameraControl:
 
         try:
             self.set_config("viewfinder", 0)
-        except UnsupportedConfigException as e:
+        except (UnsupportedConfigException, ValueError, gp.GPhoto2Error) as e:
             log.error(e)
         log.info("Video disabled")
 
@@ -264,9 +299,12 @@ class CameraControl:
             video_settings_were_updated or self.handle_video_params(args)
         )
         self.handle_bsm_timeout(args)
+        if getattr(args, "preview_fps", None) is not None:
+            self.preview_fps = max(args.preview_fps, 0)
         if args.config is not None and args.config != self.args.config:
             self.args.config = args.config
             self.connect_to_camera()
+            self.apply_configuration()
             video_settings_were_updated = True
             log.info("Applied updated config")
         if args.device != self.args.device:
@@ -459,12 +497,26 @@ class CameraControl:
         self.handle_chroma_params(self.args)
         self.handle_bsm_timeout(self.args)
         self.ffmpeg_open()
+        sd_notify("READY=1")
         try:
             while True:
+                self.ping_watchdog()
                 try:
                     message = self.socket.recv_json(flags=zmq.NOBLOCK)
                     log.info("Received: %s" % message)
-                    self.handle_message(message)
+                    try:
+                        self.handle_message(message)
+                    except (zmq.Again, SystemExit, KeyboardInterrupt):
+                        raise
+                    except Exception as e:
+                        # Never let a bad request kill the service. The REQ
+                        # client waits for exactly one answer, so send it now
+                        # unless handle_message already did.
+                        log.error("Failed to handle message: %s" % e)
+                        try:
+                            self.socket.send_string("failure")
+                        except zmq.ZMQError:
+                            pass
                 except zmq.Again:
                     pass
                 try:
@@ -475,6 +527,7 @@ class CameraControl:
                         log.info("Camera stopped because of bsm stop time")
                         self.disable_video()
                     if self.show_video:
+                        self.throttle_preview()
                         capture = self.camera.capture_preview()
                         img_bytes = memoryview(capture.get_data_and_size()).tobytes()
                         self.ffmpeg.stdin.write(img_bytes)
@@ -515,17 +568,50 @@ class CameraControl:
 
         return 0
 
+    def ping_watchdog(self):
+        """
+        Tell systemd the main loop is alive, at most every WATCHDOG_PING_INTERVAL
+        """
+        now = time.monotonic()
+        if now - self.last_watchdog_ping >= WATCHDOG_PING_INTERVAL:
+            sd_notify("WATCHDOG=1")
+            self.last_watchdog_ping = now
+
+    def throttle_preview(self):
+        """
+        Limit the live preview to `preview_fps` frames per second.
+
+        Every preview frame is decoded by ffmpeg and displayed by the browser; on
+        small boards (Raspberry Pi 3) an unlimited stream (~30 fps) keeps the CPU
+        busy and makes the board throttle. Video recording is never limited.
+        """
+        if self.preview_fps <= 0 or self.args.video_path is not None:
+            return
+        wait = self.last_preview_frame + 1.0 / self.preview_fps - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        self.last_preview_frame = time.monotonic()
+
     def exit_gracefully(self, *_, rc=0):
         """
-        Close the camera connection gracefully
+        Close the camera connection gracefully.
+
+        Errors while closing are logged but never prevent the exit, otherwise
+        stopping the service hangs until systemd kills it.
         """
         if self.running:
             self.running = False
             log.info("Exiting...")
+            sd_notify("STOPPING=1")
             if self.camera:
-                self.disable_video()
-                self.camera.exit()
-                log.info("Closed camera connection")
+                try:
+                    self.disable_video()
+                    self.camera.exit()
+                    log.info("Closed camera connection")
+                except Exception as e:
+                    log.error("Error while closing camera: %s" % e)
+            if self.ffmpeg:
+                self.ffmpeg.kill()
         sys.exit(rc)
 
     @staticmethod
@@ -538,7 +624,12 @@ class CameraControl:
         try:
             context = zmq.Context()
             socket = context.socket(zmq.REQ)
-            socket.setsockopt(zmq.RCVTIMEO, 10000)
+            # A capture (autofocus, flash recharge, download) can take longer than
+            # a simple preview command. Stay below the 25 s request timeout of
+            # the web interface.
+            timeout = 20000 if config.get("imgpath") else 10000
+            socket.setsockopt(zmq.RCVTIMEO, timeout)
+            socket.setsockopt(zmq.LINGER, 0)
             socket.connect("tcp://localhost:5555")
             log.debug("Sending message: %s" % config)
             socket.send_json(config)
@@ -695,6 +786,16 @@ def main():
         help="chroma key blend (0.0 to 1.0)",
         dest="chroma_blend",
     )
+    parser.add_argument(
+        "--previewFps",
+        type=int,
+        default=None,
+        help=(
+            "limit the live preview to this many frames per second "
+            "(0 = unlimited). Lowers CPU load and heat on small boards"
+        ),
+        dest="preview_fps",
+    )
     parser.add_argument("--exit", action="store_true", help="exit the service")
     parser.add_argument(
         "--forceRecreateCam", action="store_true", help="exit the service"
@@ -703,6 +804,12 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.ERROR)
+    if args.exit and not check_port(5555):
+        # Nothing to stop. Without this check `--exit` (systemd ExecStop) would
+        # connect to the camera and start a brand new service.
+        log.info("Service is not running, nothing to exit")
+        return 0
+
     if args.forceRecreateCam:
         log.info("Recreate virtual camera")
         recreate_virtual_camera(video_nr=9)
@@ -747,4 +854,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-create_ffmpeg_webcam_service
