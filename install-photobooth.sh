@@ -2231,11 +2231,19 @@ function create_ffmpeg_webcam_service() {
 [Unit]
 Description=ffmpeg webcam service
 After=network.target
+# keep retrying, e.g. while the camera is still switched off
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# cameracontrol.py reports READY=1 and pings the watchdog from its main loop:
+# if a gphoto2 call hangs, systemd restarts the service after WatchdogSec.
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
 Restart=on-failure
-ExecStart=/usr/bin/python3 $INSTALLFOLDERPATH/api/cameracontrol.py --forceRecreateCam
+RestartSec=5
+TimeoutStopSec=15
+ExecStart=/usr/bin/python3 $INSTALLFOLDERPATH/api/cameracontrol.py --forceRecreateCam --previewFps 15
 ExecStop=/usr/bin/python3 $INSTALLFOLDERPATH/api/cameracontrol.py --exit
 
 [Install]
