@@ -1,6 +1,62 @@
 /* eslint n/no-unsupported-features/node-builtins: "off" */
 /* globals photoboothTools shellCommand csrf */
 $(function () {
+    /**
+     * Send the admin form to api/admin.php (save or reset).
+     *
+     * The page used to wait forever when the answer was not JSON, which
+     * happens when the admin session expired (e.g. after a reboot): the
+     * server then answers with the login page. Detect it and reload, so the
+     * login page shows up. Other errors hide the loader and show the message
+     * instead of silently reloading and losing the changes.
+     */
+    function postAdminForm(type) {
+        const data = new FormData(document.querySelector('form'));
+        data.append('type', type);
+        if (typeof csrf !== 'undefined') {
+            data.append(csrf.key, csrf.token);
+        }
+
+        const fail = (message) => {
+            $('.pageLoader').removeClass('isActive');
+            $('.saving').removeClass('saving');
+            photoboothTools.console.log('ERROR: admin ' + type + ':', message);
+            alert(photoboothTools.getTranslation('error') + (message ? '\n\n' + message : ''));
+        };
+
+        fetch('../api/admin.php', {
+            method: 'POST',
+            body: data,
+            credentials: 'same-origin'
+        })
+            .then(async (response) => {
+                const contentType = response.headers.get('content-type') || '';
+                const sessionLost =
+                    response.status === 401 ||
+                    (response.redirected && response.url.includes('/login')) ||
+                    !contentType.includes('application/json');
+                if (sessionLost) {
+                    $('.pageLoader').removeClass('isActive');
+                    photoboothTools.handleCsrfMismatch('../api/admin.php');
+                    return;
+                }
+
+                const result = await response.json();
+                if (response.status === 403 && result.error) {
+                    // CSRF token from an older session
+                    $('.pageLoader').removeClass('isActive');
+                    photoboothTools.handleCsrfMismatch('../api/admin.php');
+                    return;
+                }
+                if (result.status === 'success') {
+                    window.location.reload();
+                    return;
+                }
+                fail(result.message || result.error || '');
+            })
+            .catch((error) => fail(String(error)));
+    }
+
     // Highlight save button on form changes
     const $saveButton = $('#save-admin-btn');
     const initialSerialized = $('form').serialize();
@@ -26,28 +82,7 @@ $(function () {
             $('.pageLoader').addClass('isActive');
             $('.pageLoader').find('label').html(photoboothTools.getTranslation('saving'));
 
-            const data = new FormData(document.querySelector('form'));
-            data.append('type', 'reset');
-            if (typeof csrf !== 'undefined') {
-                data.append(csrf.key, csrf.token);
-            }
-
-            fetch('../api/admin.php', {
-                method: 'POST',
-                body: data
-            })
-                .then((response) => response.json())
-                .then((data) => {
-                    if (data.status === 'success') {
-                        window.location.reload();
-                    } else {
-                        photoboothTools.console.logDev(data.message);
-                        window.location.reload();
-                    }
-                })
-                .catch((error) => {
-                    photoboothTools.console.logDev('Error:', error);
-                });
+            postAdminForm('reset');
         } else {
             elem.removeClass('saving');
         }
@@ -60,28 +95,7 @@ $(function () {
         $('.pageLoader').addClass('isActive');
         $('.pageLoader').find('label').html(photoboothTools.getTranslation('saving'));
 
-        const data = new FormData(document.querySelector('form'));
-        data.append('type', 'config');
-        if (typeof csrf !== 'undefined') {
-            data.append(csrf.key, csrf.token);
-        }
-
-        fetch('../api/admin.php', {
-            method: 'POST',
-            body: data
-        })
-            .then((response) => response.json())
-            .then((data) => {
-                if (data.status === 'success') {
-                    window.location.reload();
-                } else {
-                    photoboothTools.console.logDev(data.message);
-                    window.location.reload();
-                }
-            })
-            .catch((error) => {
-                photoboothTools.console.logDev('Error:', error);
-            });
+        postAdminForm('config');
     });
 
     $('#screensaver-preview-btn').on('click', function (e) {
