@@ -24,7 +24,8 @@ Ils ne sont pas dans le dépôt (fichiers privés ou système) :
   - `commands.preview` : `python3 cameracontrol.py --device /dev/video9`
   - `ftp.baseFolder` = `images`, `ftp.folder` et `ftp.title` vides
     (photos dans `Downloads\CherryBooth\images` et `\thumbs` sur le NAS)
-  - `start_screen.qr_*` : QR code vers https://gallery.gambi.fr/, en bas à droite, sans texte
+  - `start_screen.qr_*` : QR code vers https://gallery.gambi.fr/, en bas à droite
+  - `ui.skip_welcome` = `true`
 - `private/overrides.css` : animations allégées pour le Pi 3, QR code à 75 %
 - `/etc/systemd/system/ffmpeg-webcam.service` : à aligner sur l'unité générée
   par `install-photobooth.sh` (`Type=notify`, `WatchdogSec=30`,
@@ -32,18 +33,34 @@ Ils ne sont pas dans le dépôt (fichiers privés ou système) :
 
 ## Déployer
 
-Le Pi tourne sur une version d'août (`a92bb121`) avec des patchs appliqués à la
-main. Pour passer sur cette branche :
+Depuis le 8 novembre 2026, `/var/www/html` sur le Pi est un dépôt git sur la
+branche `cherrybooth` (propriétaire `www-data`). L'ancien état, la version
+d'août avec ses patchs manuels, est conservé dans la branche `pi-aout-patchs`.
+Une archive complète est aussi gardée dans
+`/root/photobooth-avant-cherrybooth-20261108.tgz`.
 
-1. Sauvegarder `config/`, `private/` et `data/`.
-2. Construire les fichiers générés (`npm run build`, ou au minimum
-   `npx gulp`) : CSS, JS et `resources/revisions.json`.
-3. Copier le résultat dans `/var/www/html`, puis lancer
-   `composer install --no-dev` si les dépendances PHP ont changé.
-4. Mettre à jour l'unité `ffmpeg-webcam.service` et la commande `take_picture`
-   (voir ci-dessus), puis redémarrer le service caméra et le kiosque.
+Mettre à jour (le Pi n'a pas accès à GitHub, on passe par un bundle) :
+
+1. Sur le PC : `git bundle create cb.bundle <dernier commit déployé>..cherrybooth`,
+   puis copier le bundle dans `/tmp` sur le Pi.
+2. Sur le Pi, en tant que `www-data`, dans `/var/www/html` :
+   `git fetch /tmp/cb.bundle cherrybooth:refs/remotes/bundle/cherrybooth`
+   puis `git merge --ff-only bundle/cherrybooth`.
+3. Construire, toujours en tant que `www-data` avec `HOME=/var/www` :
+   `npm install && npm run build` (environ 5 minutes sur le Pi 3). Le build
+   lance aussi `composer install` et reformate les sources : `git status` doit
+   rester propre ensuite, sinon corriger la branche.
+4. Redémarrer `php8.4-fpm`, `ffmpeg-webcam` puis le kiosque (`getty@tty1`).
 5. Vérifier une photo, l'aperçu, l'envoi SFTP et le tableau de bord
    (Admin → « Afficher le tableau de bord »).
+
+À savoir :
+
+- `npm run build` supprime `welcome/.skip_welcome`. `ui.skip_welcome` est donc
+  activé dans `my.config.inc.php` pour que l'écran de bienvenue ne revienne pas.
+- Retour arrière : `git switch pi-aout-patchs`, puis remettre l'ancienne unité
+  et l'ancienne config (sauvegardée dans `/root/my.config.inc.php.avant-cherrybooth`),
+  ou restaurer l'archive.
 
 Éteindre le Pi depuis l'admin plutôt qu'en coupant le courant : les coupures
 brutales laissent des blocs illisibles dans les journaux et peuvent abîmer la
