@@ -854,4 +854,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-create_ffmpeg_webcam_service
