@@ -183,9 +183,12 @@ class CameraControl:
                 else:
                     raise ValueError("Invalid config value %s" % c)
 
-    def capture_image(self, path: str):
+    def capture_image(self, path: str, autofocus: bool = False):
         """
         Capture an image and save it to `path`
+
+        With `autofocus`, focus in live view right before the capture
+        (see autofocus_live_view).
         """
 
         try:
@@ -194,6 +197,9 @@ class CameraControl:
             self.set_config("output", "Off")
         except (UnsupportedConfigException, ValueError, gp.GPhoto2Error) as e:
             log.error(e)
+
+        if autofocus:
+            self.autofocus_live_view()
 
         log.info("Capturing image")
         file_path = self.camera.capture(gp.GP_CAPTURE_IMAGE)
@@ -205,6 +211,37 @@ class CameraControl:
             file_path.folder, file_jpg, gp.GP_FILE_TYPE_NORMAL
         )
         camera_file.save(path)
+
+    def autofocus_live_view(self):
+        """
+        Focus in live view, then let the capture happen even if focus failed.
+
+        Nikon DSLRs (tested with a D3200) capture from live view without
+        focusing again, so pictures stay focused on whatever the preview was
+        looking at. Leaving live view to use the phase detection autofocus is
+        not an option either: when it cannot lock (dark room, subject too
+        close) the capture call blocks forever. In live view `autofocusdrive`
+        runs the contrast autofocus and returns an error quickly when it
+        fails; the picture is then taken anyway, slightly soft rather than
+        missing.
+        """
+        start = time.monotonic()
+        for name, value in (
+            ("viewfinder", 1),
+            ("autofocusdrive", 1),
+            ("autofocusdrive", 0),
+        ):
+            try:
+                config = self.camera.get_config()
+                widget = config.get_child_by_name(name)
+                widget.set_value(value)
+                self.camera.set_config(config)
+            except gp.GPhoto2Error as e:
+                if name == "autofocusdrive" and value == 1:
+                    log.error("Autofocus failed (%s), capturing anyway" % e)
+                else:
+                    log.info("Config %s=%s: %s" % (name, value, e))
+        log.info("Autofocus done in %.2fs" % (time.monotonic() - start))
 
     def print_config(self, name: str):
         """
@@ -316,7 +353,9 @@ class CameraControl:
             log.info("Restarted ffmpeg stream with updated video settings")
         if args.imgpath is not None:
             try:
-                self.capture_image(args.imgpath)
+                self.capture_image(
+                    args.imgpath, autofocus=getattr(args, "autofocus", False)
+                )
                 if args.chroma_sensitivity is not None and args.chroma_sensitivity > 0:
                     self.chroma_key_image(args.imgpath)
                 self.socket.send_string("Image captured")
@@ -787,6 +826,15 @@ def main():
         dest="chroma_blend",
     )
     parser.add_argument(
+        "--autofocus",
+        action="store_true",
+        help=(
+            "with --capture-image-and-download: focus in live view right "
+            "before the capture (Nikon DSLRs do not refocus in live view)"
+        ),
+        dest="autofocus",
+    )
+    parser.add_argument(
         "--previewFps",
         type=int,
         default=None,
@@ -840,7 +888,7 @@ def main():
 
         if args.imgpath is not None:
             try:
-                cam.capture_image(args.imgpath)
+                cam.capture_image(args.imgpath, autofocus=args.autofocus)
                 if args.chroma_sensitivity is not None and args.chroma_sensitivity > 0:
                     cam.handle_chroma_params(args)
                     cam.chroma_key_image(args.imgpath)
